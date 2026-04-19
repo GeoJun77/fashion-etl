@@ -8,6 +8,7 @@ from src.scrapers.mock_scraper import MockScraper
 from src.transformers.cleaner import Cleaner
 from src.loaders.sql_loader import init_db, start_run, finish_run, load_products
 from config.settings import settings
+from src.quality.checks import QualityChecker
 
 
 class Orchestrator:
@@ -59,6 +60,17 @@ class Orchestrator:
             loaded = load_products(clean_products)
         except Exception as e:
             logger.error(f"[Orchestrator] Load failed : {e}")
+            errors += 1
+        
+        # --- Step 4 : Quality checks ---
+        logger.info("[Orchestrator] Step 4 : Quality checks")
+        try:
+            checker = QualityChecker()
+            report = checker.run(run_id=run_id)
+            if not report.passed:
+                logger.warning("[Orchestrator] Quality checks FAILED — see report")
+        except Exception as e:
+            logger.error(f"[Orchestrator] Quality checks failed : {e}")
             errors += 1
 
         # --- Finish ---

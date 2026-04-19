@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     # Scheduling
     schedule_hours: int = 6
 
+    # Quality checks
+    null_rate_threshold: float = 0.05
+    min_price: float = 0.5
+    max_price: float = 9999.0
+
 
 # Single instance shared across the whole project
 settings = Settings()
