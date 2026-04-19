@@ -5,6 +5,7 @@ from datetime import datetime
 from loguru import logger
 
 from src.scrapers.mock_scraper import MockScraper
+from src.scrapers.vinted_scraper import VintedScraper
 from src.transformers.cleaner import Cleaner
 from src.loaders.sql_loader import init_db, start_run, finish_run, load_products
 from config.settings import settings
@@ -37,8 +38,17 @@ class Orchestrator:
         logger.info("[Orchestrator] Step 1 : Extract")
         raw_products = []
         try:
-            scraper = MockScraper()
-            raw_products = scraper.run(max_products=settings.max_products)
+            # Vinted scraper — real secondhand data
+            vinted = VintedScraper()
+            vinted_products = vinted.run(max_products=settings.max_products // 2)
+            raw_products.extend(vinted_products)
+
+            # Mock scraper — fills in while waiting for Awin approvals
+            mock = MockScraper()
+            mock_products = mock.run(max_products=settings.max_products // 2)
+            raw_products.extend(mock_products)
+
+            logger.info(f"[Orchestrator] Total extracted : {len(raw_products)} products")
         except Exception as e:
             logger.error(f"[Orchestrator] Extract failed : {e}")
             errors += 1
