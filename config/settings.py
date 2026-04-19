@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # Logging
     log_level: str = "INFO"
 
+    # Scheduling
+    schedule_hours: int = 6
+
 
 # Single instance shared across the whole project
 settings = Settings()
