@@ -2,7 +2,7 @@
 # Quality checks run after each ETL pipeline execution
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import text
@@ -64,7 +64,7 @@ class QualityChecker:
         total = self._count_products()
         report = QualityReport(
             run_id=run_id,
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             total_products=total,
         )
 

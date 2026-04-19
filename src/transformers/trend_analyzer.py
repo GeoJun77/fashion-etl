@@ -2,7 +2,7 @@
 # Analyzes trends from the products stored in the database
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import text
@@ -137,7 +137,7 @@ class TrendAnalyzer:
         )
 
         report = TrendReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             total_products=total,
             total_sources=sources,
             secondhand_rate=secondhand / total if total > 0 else 0,

@@ -1,7 +1,7 @@
 # src/loaders/sql_loader.py
 # Handles loading clean products into the database
 
-from datetime import datetime
+from datetime import datetime, timezone
 
 from loguru import logger
 from sqlalchemy import create_engine, text
@@ -91,7 +91,7 @@ def start_run() -> int:
         conn.execute(text("""
             INSERT INTO scrape_runs (started_at, status)
             VALUES (:started_at, 'running')
-        """), {"started_at": datetime.utcnow()})
+        """), {"started_at": datetime.now(timezone.utc)})
         conn.commit()
 
         # SQLite-compatible way to get the last inserted ID
@@ -114,7 +114,7 @@ def finish_run(run_id: int, products_scraped: int, products_loaded: int, errors:
                 status            = :status
             WHERE id = :run_id
         """), {
-            "finished_at":      datetime.utcnow(),
+            "finished_at":      datetime.now(timezone.utc),
             "products_scraped": products_scraped,
             "products_loaded":  products_loaded,
             "errors":           errors,
@@ -172,7 +172,7 @@ def load_products(products: list[CleanProduct]) -> int:
                     "is_promotional": product.is_promotional,
                     "is_secondhand":  product.is_secondhand,
                     "scraped_at":     product.scraped_at,
-                    "updated_at":     datetime.utcnow(),
+                    "updated_at":     datetime.now(timezone.utc),
                 })
                 loaded += 1
 
