@@ -1,0 +1,41 @@
+# .github/workflows/deploy.yml
+# Deploys to Railway on every merge to main
+
+name: Deploy to Railway
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      # Step 1 : checkout the code
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Step 2 : setup Python
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Step 3 : install dependencies
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Step 4 : run tests before deploying
+      - name: Run tests
+        run: python -m pytest tests/test_pipeline.py -v --tb=short
+
+      # Step 5 : install Railway CLI
+      - name: Install Railway CLI
+        run: npm install -g @railway/cli
+
+      # Step 6 : deploy to Railway
+      - name: Deploy to Railway
+        run: railway up --detach
+        env:
+          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
