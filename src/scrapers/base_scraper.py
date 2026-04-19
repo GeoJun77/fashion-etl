@@ -29,6 +29,8 @@ class RawProduct:
     brand: str = ""
     image_url: str = ""
     is_secondhand: bool = False
+    colors: list = field(default_factory=list)
+    sizes: list = field(default_factory=list)
     scraped_at: datetime = field(default_factory=datetime.utcnow)
     extra: dict = field(default_factory=dict)
 
@@ -61,9 +63,9 @@ class BaseScraper(ABC):
         session = requests.Session()
 
         retry_strategy = Retry(
-            total=3,                                          # max 3 attempts
-            backoff_factor=1.5,                              # waits 1.5s, 3s, 4.5s between attempts
-            status_forcelist=[429, 500, 502, 503, 504],      # retry on these HTTP errors
+            total=3,                                        # max 3 attempts
+            backoff_factor=1.5,                             # waits 1.5s, 3s, 4.5s between attempts
+            status_forcelist=[429, 500, 502, 503, 504],     # retry on these HTTP errors
         )
         adapter = HTTPAdapter(max_retries=retry_strategy)
         session.mount("https://", adapter)
