@@ -1,0 +1,42 @@
+# docker-compose.yml
+# Runs the full stack : ETL pipeline + PostgreSQL database
+
+services:
+
+  # PostgreSQL database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: fashion
+      POSTGRES_PASSWORD: fashion123
+      POSTGRES_DB: fashion_etl
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fashion"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # ETL pipeline
+  etl:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://fashion:fashion123@db:5432/fashion_etl
+      SCRAPE_DELAY: 2
+      MAX_PRODUCTS: 500
+      LOG_LEVEL: INFO
+      SCHEDULE_HOURS: 6
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+
+volumes:
+  postgres_data:

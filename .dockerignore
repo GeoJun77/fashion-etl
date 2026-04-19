@@ -1,0 +1,17 @@
+# .dockerignore
+# Files to exclude from the Docker image
+
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.coverage
+htmlcov/
+logs/
+data/raw/
+*.db
+*.sqlite3
+.git/
+.gitignore
