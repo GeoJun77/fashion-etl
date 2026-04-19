@@ -10,6 +10,7 @@ from src.transformers.cleaner import Cleaner
 from src.loaders.sql_loader import init_db, start_run, finish_run, load_products
 from config.settings import settings
 from src.quality.checks import QualityChecker
+from src.transformers.trend_analyzer import TrendAnalyzer
 
 
 class Orchestrator:
@@ -82,6 +83,17 @@ class Orchestrator:
         except Exception as e:
             logger.error(f"[Orchestrator] Quality checks failed : {e}")
             errors += 1
+        
+        # --- Step 5 : Trend analysis ---
+        logger.info("[Orchestrator] Step 5 : Trend analysis")
+        try:
+            analyzer = TrendAnalyzer()
+            trend_report = analyzer.analyze()
+            analyzer.save(trend_report)
+        except Exception as e:
+            logger.error(f"[Orchestrator] Trend analysis failed : {e}")
+            errors += 1
+
 
         # --- Finish ---
         duration = (datetime.utcnow() - start_time).total_seconds()
