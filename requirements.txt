@@ -1,7 +1,7 @@
 # Web scraping
 requests==2.31.0
 beautifulsoup4==4.12.3
-lxml==5.1.0
+lxml==5.2.0
 
 # Data processing
 pandas==2.2.1
@@ -15,8 +15,8 @@ apscheduler==3.10.4
 
 # Configuration
 python-dotenv==1.0.1
-pydantic==2.6.3
-pydantic-settings==2.2.1
+pydantic>=2.7.0
+pydantic-settings>=2.3.0
 
 # Logging
 loguru==0.7.2
@@ -30,4 +30,4 @@ pytest-mock==3.14.0
 ruff==0.3.4
 
 # Dashboard
-streamlit==1.33.0
+streamlit>=1.33.0
