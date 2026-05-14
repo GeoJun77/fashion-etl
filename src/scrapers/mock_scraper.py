@@ -2,7 +2,7 @@
 # Generates realistic mock product data for testing the pipeline
 
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Iterator
 
 from src.scrapers.base_scraper import BaseScraper, RawProduct
@@ -278,7 +278,7 @@ class MockScraper(BaseScraper):
 
     def _get_current_season(self) -> str:
         """Returns the current fashion season based on the current month."""
-        month = datetime.utcnow().month
+        month = datetime.now(timezone.utc).month
         if month in [3, 4, 5, 6, 7, 8]:
             return "spring_summer"
         return "autumn_winter"
@@ -424,7 +424,7 @@ class MockScraper(BaseScraper):
                 image_url=f"https://cdn.{source}.com/images/{product_id}.jpg",
                 colors=colors,
                 sizes=sizes,
-                scraped_at=datetime.utcnow(),
+                scraped_at=datetime.now(timezone.utc),
                 extra={
                     "has_promo": is_promo,
                     "promo_price": original_price,
