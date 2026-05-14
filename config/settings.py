@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     min_price: float = 0.5
     max_price: float = 9999.0
 
+    # Awin
+    awin_feed_url: str = ""
+
 
 # Single instance shared across the whole project
 settings = Settings()
