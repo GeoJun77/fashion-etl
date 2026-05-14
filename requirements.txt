@@ -1,7 +1,7 @@
 # Web scraping
 requests==2.31.0
 beautifulsoup4==4.12.3
-lxml==5.2.0
+# lxml==5.2.0
 
 # Data processing
 pandas==2.2.1
