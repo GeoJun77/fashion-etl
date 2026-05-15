@@ -77,13 +77,13 @@ Out of 31 Awin program applications, only 2 were approved (Sneakin FR and Kastne
 Extract                Transform              Load
 ───────                ─────────              ────
 Vinted API    ──┐      Cleaner        ──┐     SQL Loader    ──┐
-Awin Feed     ──┼──▶ - Normalize   ─────|──▶ - Upsert    ────┼──▶ SQLite / PostgreSQL
+Awin Feed     ──┼──▶ - Normalize   ─────┼──▶ - Upsert    ────┼──▶ SQLite / PostgreSQL
 MockScraper   ──┘     - Deduplicate   ──┘     - Log run     ──┘
 - Slug gen
 ↓
 Quality Checks (7)
 ↓
-Trend Analyzer (6 insights)
+Trend Analyzer
 ```
 
 ### Quality Checks
