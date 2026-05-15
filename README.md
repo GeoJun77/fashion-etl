@@ -23,6 +23,7 @@ This project covers the full data engineering stack :
 
 ## 🏗️ Architecture
 
+```bash
 fashion-etl/
 ├── src/
 │   ├── scrapers/          # Data extraction
@@ -48,7 +49,7 @@ fashion-etl/
 ├── tests/                 # 28 unit tests
 ├── docker/                # Dockerfile + docker-compose
 └── .github/workflows/     # CI/CD GitHub Actions
-
+```
 ---
 
 ## 📊 Data Sources
@@ -72,6 +73,7 @@ Out of 31 Awin program applications, only 2 were approved (Sneakin FR and Kastne
 
 ## 🔄 ETL Pipeline
 
+```bash
 Extract                Transform              Load
 ───────                ─────────              ────
 Vinted API    ──┐      Cleaner        ──┐     SQL Loader   ──┐
@@ -82,6 +84,7 @@ MockScraper   ──┘      - Deduplicate  ──┘     - Log run    ──┘
 Quality Checks (7)
 ↓
 Trend Analyzer (6 insights)
+```
 
 ### Quality Checks
 After each run, 7 automated checks are performed :
