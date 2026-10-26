@@ -5,9 +5,17 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
+from src.loaders.schema import trends
 from src.loaders.sql_loader import engine
+
+# Portable SQL (SQLite + PostgreSQL) : booleans are averaged through CASE WHEN,
+# rounding is done in Python (ROUND(double, int) does not exist in PostgreSQL)
+
+
+def _round(value, digits: int = 2):
+    return round(float(value), digits) if value is not None else None
 
 
 @dataclass
@@ -133,7 +141,7 @@ class TrendAnalyzer:
         total = self._query_scalar("SELECT COUNT(*) FROM products")
         sources = self._query_scalar("SELECT COUNT(DISTINCT source) FROM products")
         secondhand = self._query_scalar(
-            "SELECT COUNT(*) FROM products WHERE is_secondhand = 1"
+            "SELECT COUNT(*) FROM products WHERE is_secondhand = :flag", {"flag": True}
         )
 
         report = TrendReport(
@@ -162,19 +170,14 @@ class TrendAnalyzer:
         )
         return report
 
-    def save(self, report: TrendReport) -> None:
-        """Saves the trend report to the trends table in the database."""
-        with engine.connect() as conn:
-            for cat in report.categories:
-                conn.execute(text("""
-                    INSERT INTO trends (
-                        category, avg_price, min_price, max_price,
-                        product_count, promo_rate, computed_at
-                    ) VALUES (
-                        :category, :avg_price, :min_price, :max_price,
-                        :product_count, :promo_rate, :computed_at
-                    )
-                """), {
+    def save(self, report: TrendReport, run_id: int | None = None) -> None:
+        """Saves the per-category stats to the trends table, linked to the run."""
+        if not report.categories:
+            return
+        with engine.begin() as conn:
+            conn.execute(insert(trends), [
+                {
+                    "run_id":        run_id,
                     "category":      cat.category,
                     "avg_price":     cat.avg_price,
                     "min_price":     cat.min_price,
@@ -182,8 +185,9 @@ class TrendAnalyzer:
                     "product_count": cat.product_count,
                     "promo_rate":    cat.promo_rate,
                     "computed_at":   report.generated_at,
-                })
-            conn.commit()
+                }
+                for cat in report.categories
+            ])
 
         logger.info(
             f"[TrendAnalyzer] {len(report.categories)} trends saved to database"
@@ -196,15 +200,14 @@ class TrendAnalyzer:
         rows = self._query("""
             SELECT
                 category,
-                COUNT(*)                      as count,
-                ROUND(AVG(price), 2)          as avg_price,
-                ROUND(MIN(price), 2)          as min_price,
-                ROUND(MAX(price), 2)          as max_price,
-                ROUND(AVG(is_promotional), 3) as promo_rate
+                COUNT(*)      as product_count,
+                AVG(price)    as avg_price,
+                MIN(price)    as min_price,
+                MAX(price)    as max_price,
+                AVG(CASE WHEN is_promotional THEN 1.0 ELSE 0.0 END)  as promo_rate
             FROM products
-            WHERE category IS NOT NULL
             GROUP BY category
-            ORDER BY count DESC
+            ORDER BY product_count DESC
         """)
 
         categories = []
@@ -213,10 +216,10 @@ class TrendAnalyzer:
             categories.append(CategoryTrend(
                 category=category,
                 product_count=row[1],
-                avg_price=row[2],
-                min_price=row[3],
-                max_price=row[4],
-                promo_rate=row[5] or 0,
+                avg_price=_round(row[2]),
+                min_price=_round(row[3]),
+                max_price=_round(row[4]),
+                promo_rate=_round(row[5], 3) or 0.0,
                 top_brands=self._top_brands_for_category(category),
                 top_sources=self._top_sources_for_category(category),
                 cheapest_products=self._cheapest_products_for_category(category),
@@ -228,17 +231,15 @@ class TrendAnalyzer:
         """Splits products into price segments and computes stats per segment."""
         result = {}
         for segment, (min_p, max_p) in self.PRICE_SEGMENTS.items():
-            rows = self._query(f"""
-                SELECT
-                    COUNT(*) as count,
-                    ROUND(AVG(price), 2) as avg_price
+            rows = self._query("""
+                SELECT COUNT(*), AVG(price)
                 FROM products
-                WHERE price >= {min_p} AND price < {max_p}
-            """)
+                WHERE price >= :min_p AND price < :max_p
+            """, {"min_p": min_p, "max_p": max_p})
             row = rows[0] if rows else (0, None)
             result[segment] = {
                 "count":     row[0],
-                "avg_price": row[1],
+                "avg_price": _round(row[1]),
                 "range":     f"{min_p}€ - {max_p}€",
             }
         return result
@@ -248,8 +249,8 @@ class TrendAnalyzer:
         rows = self._query("""
             SELECT
                 is_secondhand,
-                ROUND(AVG(price), 2) as avg_price,
-                COUNT(*)             as count
+                AVG(price) as avg_price,
+                COUNT(*)   as count
             FROM products
             WHERE price IS NOT NULL
             GROUP BY is_secondhand
@@ -257,10 +258,10 @@ class TrendAnalyzer:
 
         result = {"secondhand_avg": None, "new_avg": None, "difference": None}
         for row in rows:
-            if row[0] == 1:
-                result["secondhand_avg"] = row[1]
+            if row[0]:
+                result["secondhand_avg"] = _round(row[1])
             else:
-                result["new_avg"] = row[1]
+                result["new_avg"] = _round(row[1])
 
         # Compute price difference
         if result["secondhand_avg"] and result["new_avg"]:
@@ -275,13 +276,12 @@ class TrendAnalyzer:
         rows = self._query("""
             SELECT
                 category,
-                COUNT(*)                      as total,
-                SUM(is_promotional)           as promo_count,
-                ROUND(AVG(is_promotional), 3) as promo_rate
+                COUNT(*)      as total,
+                SUM(CASE WHEN is_promotional THEN 1.0 ELSE 0.0 END)  as promo_count,
+                AVG(CASE WHEN is_promotional THEN 1.0 ELSE 0.0 END)  as promo_rate
             FROM products
-            WHERE category IS NOT NULL
             GROUP BY category
-            HAVING total >= 10
+            HAVING COUNT(*) >= 10
             ORDER BY promo_rate DESC
         """)
 
@@ -289,8 +289,8 @@ class TrendAnalyzer:
             {
                 "category":    row[0],
                 "total":       row[1],
-                "promo_count": row[2],
-                "promo_rate":  row[3] or 0,
+                "promo_count": int(row[2] or 0),
+                "promo_rate":  _round(row[3], 3) or 0.0,
             }
             for row in rows
         ]
@@ -299,17 +299,17 @@ class TrendAnalyzer:
         """Returns the top brands for each price segment."""
         result = {}
         for segment, (min_p, max_p) in self.PRICE_SEGMENTS.items():
-            rows = self._query(f"""
+            rows = self._query("""
                 SELECT brand, COUNT(*) as count
                 FROM products
-                WHERE price >= {min_p}
-                AND price < {max_p}
+                WHERE price >= :min_p
+                AND price < :max_p
                 AND brand IS NOT NULL
                 AND brand != ''
                 GROUP BY brand
                 ORDER BY count DESC
                 LIMIT 5
-            """)
+            """, {"min_p": min_p, "max_p": max_p})
             result[segment] = [
                 {"brand": row[0], "count": row[1]} for row in rows
             ]
@@ -324,7 +324,6 @@ class TrendAnalyzer:
                 COUNT(DISTINCT source) as source_count,
                 COUNT(*)               as product_count
             FROM products
-            WHERE category IS NOT NULL
             GROUP BY category
             ORDER BY source_count DESC
         """)
@@ -340,21 +339,20 @@ class TrendAnalyzer:
 
     def _analyze_price_evolution(self) -> list[dict]:
         """
-        Tracks average price evolution across pipeline runs.
-        Joins products with scrape_runs via scraped_at timestamp.
+        Average price observed at each successful run, read from price_history
+        (the products table only keeps the latest price).
         """
         rows = self._query("""
             SELECT
-                sr.id                        as run_id,
-                sr.started_at                as run_date,
-                ROUND(AVG(p.price), 2)       as avg_price,
-                COUNT(p.id)                  as product_count
-            FROM scrape_runs sr
-            JOIN products p
-                ON DATE(p.scraped_at) = DATE(sr.started_at)
-            WHERE p.price IS NOT NULL
-            AND sr.status = 'success'
-            GROUP BY sr.id
+                sr.id          as run_id,
+                sr.started_at  as run_date,
+                AVG(ph.price)  as avg_price,
+                COUNT(*)       as product_count
+            FROM price_history ph
+            JOIN scrape_runs sr ON sr.id = ph.run_id
+            WHERE ph.price IS NOT NULL
+            AND sr.status IN ('success', 'partial')
+            GROUP BY sr.id, sr.started_at
             ORDER BY sr.id ASC
         """)
 
@@ -362,7 +360,7 @@ class TrendAnalyzer:
             {
                 "run_id":        row[0],
                 "run_date":      str(row[1]),
-                "avg_price":     row[2],
+                "avg_price":     _round(row[2]),
                 "product_count": row[3],
             }
             for row in rows
@@ -370,53 +368,53 @@ class TrendAnalyzer:
 
     def _top_brands(self, limit: int = 20) -> list[dict]:
         """Returns the most frequent brands across all products."""
-        rows = self._query(f"""
+        rows = self._query("""
             SELECT brand, COUNT(*) as count
             FROM products
             WHERE brand IS NOT NULL AND brand != ''
             GROUP BY brand
             ORDER BY count DESC
-            LIMIT {limit}
-        """)
+            LIMIT :limit
+        """, {"limit": limit})
         return [{"brand": row[0], "count": row[1]} for row in rows]
 
     def _top_brands_for_category(self, category: str, limit: int = 5) -> list[dict]:
         """Returns the top brands for a specific category."""
-        rows = self._query(f"""
+        rows = self._query("""
             SELECT brand, COUNT(*) as count
             FROM products
-            WHERE category = '{category}'
+            WHERE category = :category
             AND brand IS NOT NULL AND brand != ''
             GROUP BY brand
             ORDER BY count DESC
-            LIMIT {limit}
-        """)
+            LIMIT :limit
+        """, {"category": category, "limit": limit})
         return [{"brand": row[0], "count": row[1]} for row in rows]
 
     def _top_sources_for_category(self, category: str, limit: int = 5) -> list[dict]:
         """Returns the top sources for a specific category."""
-        rows = self._query(f"""
+        rows = self._query("""
             SELECT source, COUNT(*) as count
             FROM products
-            WHERE category = '{category}'
+            WHERE category = :category
             GROUP BY source
             ORDER BY count DESC
-            LIMIT {limit}
-        """)
+            LIMIT :limit
+        """, {"category": category, "limit": limit})
         return [{"source": row[0], "count": row[1]} for row in rows]
 
     def _cheapest_products_for_category(
         self, category: str, limit: int = 3
     ) -> list[dict]:
         """Returns the cheapest products for a specific category."""
-        rows = self._query(f"""
+        rows = self._query("""
             SELECT title, brand, price, url
             FROM products
-            WHERE category = '{category}'
+            WHERE category = :category
             AND price IS NOT NULL
             ORDER BY price ASC
-            LIMIT {limit}
-        """)
+            LIMIT :limit
+        """, {"category": category, "limit": limit})
         return [
             {
                 "title": row[0],
@@ -429,14 +427,14 @@ class TrendAnalyzer:
 
     # --- Helpers ---
 
-    def _query(self, sql: str) -> list:
-        """Executes a SQL query and returns all rows."""
+    @staticmethod
+    def _query(sql: str, params: dict | None = None) -> list:
+        """Executes a parameterized SQL query and returns all rows."""
         with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            return result.fetchall()
+            return conn.execute(text(sql), params or {}).fetchall()
 
-    def _query_scalar(self, sql: str) -> int:
-        """Executes a SQL query and returns a single value."""
+    @staticmethod
+    def _query_scalar(sql: str, params: dict | None = None):
+        """Executes a parameterized SQL query and returns a single value."""
         with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            return result.fetchone()[0]
+            return conn.execute(text(sql), params or {}).scalar()

@@ -1,0 +1,24 @@
+[project]
+name = "fashion-etl"
+version = "1.0.0"
+description = "ETL pipeline analyzing French fashion e-commerce data (Vinted, Awin feeds)"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["venv", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = [
+    "UP017",  # keep timezone.utc, more explicit than datetime.UTC
+]
+
+[tool.ruff.lint.per-file-ignores]
+"conftest.py" = ["E402"]
+"src/transformers/categories.py" = ["E501"]  # keyword tables read better on one line

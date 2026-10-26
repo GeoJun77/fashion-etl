@@ -1,14 +1,22 @@
 # src/quality/checks.py
-# Quality checks run after each ETL pipeline execution
+# Data quality checks run after each pipeline execution.
+#
+# Every check looks at the products recorded during the current run (price_history.run_id),
+# not at the whole table — otherwise old data would hide a broken run.
+# Checks that the cleaner or the schema already guarantee (price range, unique URLs,
+# non-empty titles) are deliberately not repeated here : they could never fail.
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from loguru import logger
-from sqlalchemy import text
+from sqlalchemy import insert, text
 
-from src.loaders.sql_loader import engine
 from config.settings import settings
+from src.loaders.schema import quality_results
+from src.loaders.sql_loader import engine
+
+PRICE_SWING_RATIO = 0.70  # a price moving more than 70% between two runs is suspicious
 
 
 @dataclass
@@ -28,13 +36,17 @@ class QualityReport:
     generated_at: datetime
     total_products: int
     results: list[QualityResult] = field(default_factory=list)
-    passed: bool = True
+
+    @property
+    def passed(self) -> bool:
+        return all(r.passed for r in self.results)
+
+    @property
+    def failed_checks(self) -> list[str]:
+        return [r.check_name for r in self.results if not r.passed]
 
     def add(self, result: QualityResult) -> None:
-        """Adds a check result and updates the global pass/fail status."""
         self.results.append(result)
-        if not result.passed:
-            self.passed = False
 
     def summary(self) -> str:
         """Returns a readable summary of the quality report."""
@@ -42,7 +54,7 @@ class QualityReport:
         lines = [
             f"Quality Report — Run #{self.run_id} — {status}",
             f"Generated at : {self.generated_at}",
-            f"Total products : {self.total_products}",
+            f"Products in run : {self.total_products}",
             "---",
         ]
         for r in self.results:
@@ -53,165 +65,166 @@ class QualityReport:
 
 class QualityChecker:
     """
-    Runs quality checks on the products table after each pipeline run.
-    Checks : null rates, price ranges, duplicates, source coverage.
+    Runs quality checks on the products recorded during one run :
+    volume, completeness (price, brand, category), source coverage,
+    volume drop vs the previous run and abnormal price swings.
     """
 
-    def run(self, run_id: int) -> QualityReport:
-        """Runs all quality checks and returns a full report."""
+    def run(self, run_id: int, save: bool = True) -> QualityReport:
+        """Runs all quality checks, stores the results (unless save=False) and returns the report."""
         logger.info(f"[Quality] Running checks for run #{run_id}")
+        params = {"run_id": run_id}
 
-        total = self._count_products()
-        report = QualityReport(
-            run_id=run_id,
-            generated_at=datetime.now(timezone.utc),
-            total_products=total,
-        )
+        stats = self._query_one("""
+            SELECT
+                COUNT(*),
+                SUM(CASE WHEN p.price IS NULL THEN 1 ELSE 0 END),
+                SUM(CASE WHEN p.brand IS NULL OR p.brand = '' THEN 1 ELSE 0 END),
+                SUM(CASE WHEN p.category = 'other' THEN 1 ELSE 0 END),
+                COUNT(DISTINCT p.source)
+            FROM price_history ph
+            JOIN products p ON p.id = ph.product_id
+            WHERE ph.run_id = :run_id
+        """, params)
+        total, null_prices, null_brands, uncategorized, sources = (v or 0 for v in stats)
 
-        if total == 0:
-            logger.warning("[Quality] No products found in database")
-            return report
+        report = QualityReport(run_id=run_id, generated_at=datetime.now(timezone.utc), total_products=total)
+        report.add(self._check_volume(total))
+        if total > 0:
+            report.add(self._rate_check("Null prices", null_prices, total, settings.null_rate_threshold))
+            report.add(self._rate_check("Null brands", null_brands, total, settings.null_brand_threshold))
+            report.add(self._rate_check("Uncategorized products", uncategorized, total,
+                                        settings.uncategorized_threshold))
+            report.add(self._check_source_coverage(sources))
+            report.add(self._check_volume_drop(run_id, total))
+            report.add(self._check_price_swings(run_id))
 
-        # Run all checks
-        report.add(self._check_null_titles(total))
-        report.add(self._check_null_prices(total))
-        report.add(self._check_null_brands(total))
-        report.add(self._check_null_categories(total))
-        report.add(self._check_price_range())
-        report.add(self._check_duplicates())
-        report.add(self._check_source_coverage())
+        if save:
+            self._save(report)
 
-        # Log the summary
         status = "PASSED" if report.passed else "FAILED"
         logger.info(f"[Quality] Report {status} — {len(report.results)} checks")
-
-        # Log each failed check
         for r in report.results:
             if not r.passed:
                 logger.warning(f"[Quality] FAIL — {r.check_name} : {r.message}")
-
         return report
 
     # --- Individual checks ---
 
-    def _check_null_titles(self, total: int) -> QualityResult:
-        """Checks the percentage of products with empty titles."""
-        count = self._query_scalar(
-            "SELECT COUNT(*) FROM products WHERE title IS NULL OR title = ''"
-        )
-        rate = count / total
-        threshold = settings.null_rate_threshold
+    @staticmethod
+    def _check_volume(total: int) -> QualityResult:
         return QualityResult(
-            check_name="Null titles",
+            check_name="Products loaded",
+            passed=total > 0,
+            value=float(total),
+            threshold=1.0,
+            message=f"{total} products loaded in this run",
+        )
+
+    @staticmethod
+    def _rate_check(name: str, count: int, total: int, threshold: float) -> QualityResult:
+        rate = count / total
+        return QualityResult(
+            check_name=name,
             passed=rate <= threshold,
             value=rate,
             threshold=threshold,
-            message=f"{count} null titles ({rate:.1%}) — threshold {threshold:.1%}",
+            message=f"{count}/{total} ({rate:.1%}) — threshold {threshold:.0%}",
         )
 
-    def _check_null_prices(self, total: int) -> QualityResult:
-        """Checks the percentage of products with missing prices."""
-        count = self._query_scalar(
-            "SELECT COUNT(*) FROM products WHERE price IS NULL"
-        )
-        rate = count / total
-        threshold = settings.null_rate_threshold
-        return QualityResult(
-            check_name="Null prices",
-            passed=rate <= threshold,
-            value=rate,
-            threshold=threshold,
-            message=f"{count} null prices ({rate:.1%}) — threshold {threshold:.1%}",
-        )
-
-    def _check_null_brands(self, total: int) -> QualityResult:
-        """Checks the percentage of products with missing brands."""
-        count = self._query_scalar(
-            "SELECT COUNT(*) FROM products WHERE brand IS NULL OR brand = ''"
-        )
-        rate = count / total
-        threshold = 0.20  # Allow up to 20% missing brands
-        return QualityResult(
-            check_name="Null brands",
-            passed=rate <= threshold,
-            value=rate,
-            threshold=threshold,
-            message=f"{count} null brands ({rate:.1%}) — threshold {threshold:.1%}",
-        )
-
-    def _check_null_categories(self, total: int) -> QualityResult:
-        """Checks the percentage of products with missing categories."""
-        count = self._query_scalar(
-            "SELECT COUNT(*) FROM products WHERE category IS NULL OR category = ''"
-        )
-        rate = count / total
-        threshold = settings.null_rate_threshold
-        return QualityResult(
-            check_name="Null categories",
-            passed=rate <= threshold,
-            value=rate,
-            threshold=threshold,
-            message=f"{count} null categories ({rate:.1%}) — threshold {threshold:.1%}",
-        )
-
-    def _check_price_range(self) -> QualityResult:
-        """Checks for products with prices outside the valid range."""
-        count = self._query_scalar(f"""
-            SELECT COUNT(*) FROM products
-            WHERE price IS NOT NULL
-            AND (price < {settings.min_price} OR price > {settings.max_price})
-        """)
-        passed = count == 0
-        return QualityResult(
-            check_name="Price range",
-            passed=passed,
-            value=float(count),
-            threshold=0,
-            message=f"{count} products with price outside [{settings.min_price}, {settings.max_price}]",
-        )
-
-    def _check_duplicates(self) -> QualityResult:
-        """Checks for duplicate URLs in the products table."""
-        count = self._query_scalar("""
-            SELECT COUNT(*) FROM (
-                SELECT url, COUNT(*) as cnt
-                FROM products
-                GROUP BY url
-                HAVING cnt > 1
-            )
-        """)
-        passed = count == 0
-        return QualityResult(
-            check_name="Duplicate URLs",
-            passed=passed,
-            value=float(count),
-            threshold=0,
-            message=f"{count} duplicate URLs found",
-        )
-
-    def _check_source_coverage(self) -> QualityResult:
-        """Checks that at least 2 different sources are present."""
-        count = self._query_scalar(
-            "SELECT COUNT(DISTINCT source) FROM products"
-        )
-        min_sources = 2
-        passed = count >= min_sources
+    @staticmethod
+    def _check_source_coverage(sources: int) -> QualityResult:
         return QualityResult(
             check_name="Source coverage",
-            passed=passed,
-            value=float(count),
-            threshold=float(min_sources),
-            message=f"{count} distinct sources — minimum {min_sources}",
+            passed=sources >= settings.min_sources,
+            value=float(sources),
+            threshold=float(settings.min_sources),
+            message=f"{sources} distinct sources — minimum {settings.min_sources}",
+        )
+
+    def _check_volume_drop(self, run_id: int, total: int) -> QualityResult:
+        """Fails when a run loads far fewer products than the previous one (a source broke silently)."""
+        previous = self._query_one("""
+            SELECT COUNT(*) FROM price_history
+            WHERE run_id = (
+                SELECT MAX(id) FROM scrape_runs
+                WHERE id < :run_id AND status IN ('success', 'partial')
+            )
+        """, {"run_id": run_id})[0] or 0
+
+        if previous == 0:
+            return QualityResult("Volume vs previous run", True, 0.0, settings.max_volume_drop,
+                                 "no previous run to compare with")
+
+        drop = max(0.0, 1 - total / previous)
+        return QualityResult(
+            check_name="Volume vs previous run",
+            passed=drop <= settings.max_volume_drop,
+            value=drop,
+            threshold=settings.max_volume_drop,
+            message=f"{total} products vs {previous} in previous run ({drop:.0%} drop)",
+        )
+
+    def _check_price_swings(self, run_id: int) -> QualityResult:
+        """
+        Compares each product's price with its previous recorded price.
+        Many huge swings at once usually mean a parsing bug, not real price changes.
+        """
+        rows = self._query_all("""
+            SELECT
+                cur.price,
+                (
+                    SELECT prev.price FROM price_history prev
+                    WHERE prev.product_id = cur.product_id
+                    AND prev.run_id < cur.run_id
+                    AND prev.price IS NOT NULL
+                    ORDER BY prev.run_id DESC
+                    LIMIT 1
+                ) AS previous_price
+            FROM price_history cur
+            WHERE cur.run_id = :run_id AND cur.price IS NOT NULL
+        """, {"run_id": run_id})
+
+        compared = [(cur, prev) for cur, prev in rows if prev]
+        swings = sum(1 for cur, prev in compared if abs(cur - prev) / prev > PRICE_SWING_RATIO)
+        rate = swings / len(compared) if compared else 0.0
+        return QualityResult(
+            check_name="Price swings",
+            passed=rate <= settings.max_price_swing_rate,
+            value=rate,
+            threshold=settings.max_price_swing_rate,
+            message=(
+                f"{swings}/{len(compared)} products changed price by more than {PRICE_SWING_RATIO:.0%}"
+                if compared else "no previously seen products to compare"
+            ),
         )
 
     # --- Helpers ---
 
-    def _count_products(self) -> int:
-        """Returns the total number of products in the database."""
-        return self._query_scalar("SELECT COUNT(*) FROM products")
+    @staticmethod
+    def _save(report: QualityReport) -> None:
+        if not report.results:
+            return
+        with engine.begin() as conn:
+            conn.execute(insert(quality_results), [
+                {
+                    "run_id": report.run_id,
+                    "check_name": r.check_name,
+                    "passed": r.passed,
+                    "value": r.value,
+                    "threshold": r.threshold,
+                    "message": r.message,
+                    "checked_at": report.generated_at,
+                }
+                for r in report.results
+            ])
 
-    def _query_scalar(self, sql: str) -> int:
-        """Executes a SQL query and returns a single integer value."""
+    @staticmethod
+    def _query_one(sql: str, params: dict) -> tuple:
         with engine.connect() as conn:
-            result = conn.execute(text(sql))
-            return result.fetchone()[0]
+            return tuple(conn.execute(text(sql), params).fetchone())
+
+    @staticmethod
+    def _query_all(sql: str, params: dict) -> list[tuple]:
+        with engine.connect() as conn:
+            return [tuple(r) for r in conn.execute(text(sql), params).fetchall()]

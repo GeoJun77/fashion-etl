@@ -2,8 +2,8 @@
 # Generates realistic mock product data for testing the pipeline
 
 import random
+from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import Iterator
 
 from src.scrapers.base_scraper import BaseScraper, RawProduct
 
@@ -11,19 +11,16 @@ from src.scrapers.base_scraper import BaseScraper, RawProduct
 class MockScraper(BaseScraper):
     """
     Generates realistic mock fashion products.
-    Used for testing the pipeline while waiting for Awin API approvals.
+    Used by the unit tests and for offline development (USE_MOCK=true).
+    Never enabled by default, so the demo database only contains real data.
     Includes : brands, sizes, materials, seasonal trends, descriptions.
     """
 
+    # Fictional shops — every source is prefixed with "mock_" so synthetic rows
+    # can never be mistaken for real data (real sources: vinted, sneakin, kastner_ohler)
     SOURCES = [
-        "shein", "hugo_boss", "lacoste", "guess", "etam",
-        "jd_sports", "foot_locker", "benetton", "karl_lagerfeld",
-        "pretty_little_thing", "boohoo", "yours_grandes_tailles",
-        "cdiscount", "ms_mode", "cecil_mode", "street_one",
-        "ulla_popken", "tezenis", "hunkemoller", "lululemon",
-        "geox", "sneakin", "noukies", "prive_by_zalando",
-        "adidas", "3_suisses", "intimissimi", "the_bradery",
-        "yesstyle", "strellson", "kastner_ohler",
+        "mock_shop_a", "mock_shop_b", "mock_shop_c",
+        "mock_shop_d", "mock_shop_e", "mock_shop_f",
     ]
 
     CATEGORIES = [
@@ -389,7 +386,7 @@ class MockScraper(BaseScraper):
         """Generates random but realistic mock products."""
         season = self._get_current_season()
 
-        for i in range(max_products):
+        for _ in range(max_products):
             category = random.choice(self.CATEGORIES)
             brand, price, is_promo, original_price = self._get_brand_and_price(category)
             adjective = random.choice(self.ADJECTIVES)
@@ -415,13 +412,13 @@ class MockScraper(BaseScraper):
 
             yield RawProduct(
                 source=source,
-                url=f"https://www.{source}.com/fr/product/{product_id}",
+                url=f"https://mock.example/{source}/product/{product_id}",
                 title=f"{adjective} {product_type} {brand}",
                 price_raw=str(price),
                 currency="EUR",
                 category_raw=category,
                 brand=brand,
-                image_url=f"https://cdn.{source}.com/images/{product_id}.jpg",
+                image_url=f"https://mock.example/{source}/images/{product_id}.jpg",
                 colors=colors,
                 sizes=sizes,
                 scraped_at=datetime.now(timezone.utc),

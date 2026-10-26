@@ -1,12 +1,12 @@
 # src/scrapers/base_scraper.py
 # Base class for all scrapers — handles retries, rate-limiting and headers
 
-import time
 import random
+import time
 from abc import ABC, abstractmethod
+from collections.abc import Iterator
 from dataclasses import dataclass, field
-from datetime import datetime
-from typing import Iterator
+from datetime import datetime, timezone
 
 import requests
 from bs4 import BeautifulSoup
@@ -31,7 +31,7 @@ class RawProduct:
     is_secondhand: bool = False
     colors: list = field(default_factory=list)
     sizes: list = field(default_factory=list)
-    scraped_at: datetime = field(default_factory=datetime.utcnow)
+    scraped_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     extra: dict = field(default_factory=dict)
 
 
@@ -109,7 +109,7 @@ class BaseScraper(ABC):
             response.raise_for_status()
             self._request_count += 1
             logger.debug(f"[{self.source_name}] GET {url} → {response.status_code}")
-            return BeautifulSoup(response.text, "lxml")
+            return BeautifulSoup(response.text, "html.parser")
 
         except requests.exceptions.HTTPError as e:
             logger.error(f"[{self.source_name}] HTTP error : {e}")

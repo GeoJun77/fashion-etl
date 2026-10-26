@@ -2,10 +2,17 @@
 # Scraper for Vinted FR — uses the public API with session authentication
 
 import time
-from typing import Iterator
+from collections.abc import Iterator
+
 from loguru import logger
 
+from config.settings import settings
 from src.scrapers.base_scraper import BaseScraper, RawProduct
+
+USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+)
 
 
 class VintedScraper(BaseScraper):
@@ -20,7 +27,7 @@ class VintedScraper(BaseScraper):
 
     # Fixed headers that work with the Vinted API
     API_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": USER_AGENT,
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "fr-FR,fr;q=0.9",
         "Referer": "https://www.vinted.fr/",
@@ -28,7 +35,7 @@ class VintedScraper(BaseScraper):
     }
 
     HOME_HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+        "User-Agent": USER_AGENT,
         "Accept": "text/html",
         "Accept-Language": "fr-FR,fr;q=0.9",
     }
@@ -178,7 +185,7 @@ class VintedScraper(BaseScraper):
                 params={
                     "per_page":   per_page,
                     "order":      "newest_first",
-                    "catalog_id": category_id,
+                    "catalog_ids": category_id,  # plural : "catalog_id" is silently ignored by the API
                 },
                 timeout=30,
             )
@@ -199,7 +206,7 @@ class VintedScraper(BaseScraper):
                 products.append(product)
 
         # Respect rate limiting between category requests
-        time.sleep(2)
+        time.sleep(settings.scrape_delay)
         return products
 
     def _parse_item(self, item: dict, category_label: str) -> RawProduct | None:
