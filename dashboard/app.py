@@ -2,13 +2,19 @@
 # Streamlit dashboard for the Fashion ETL pipeline
 # Shows trends, prices, brands and sources from the database
 
-import sqlite3
 import re
+import sys
 from collections import Counter
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from sqlalchemy import create_engine, inspect
+
+# `streamlit run dashboard/app.py` only puts dashboard/ on the path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from config.settings import settings  # noqa: E402
 
 # --- Page config ---
 st.set_page_config(
@@ -17,25 +23,28 @@ st.set_page_config(
     layout="wide",
 )
 
-# --- Database connection ---
-DB_PATH = Path(__file__).parent.parent / "fashion.db"
+# --- Database connection : same DATABASE_URL as the pipeline (SQLite or PostgreSQL) ---
+TABLES = ["products", "scrape_runs", "price_history", "quality_results"]
+
+
+@st.cache_resource
+def get_engine():
+    return create_engine(settings.database_url, pool_pre_ping=True)
 
 
 @st.cache_data(ttl=300)  # Cache data for 5 minutes
 def load_data() -> dict:
-    """Loads all data from the SQLite database."""
-    if not DB_PATH.exists():
+    """Loads the tables used by the dashboard. Returns {} if the pipeline never ran."""
+    engine = get_engine()
+    if not set(TABLES) <= set(inspect(engine).get_table_names()):
         return {}
 
-    conn = sqlite3.connect(DB_PATH)
+    with engine.connect() as conn:
+        data = {table: pd.read_sql(f"SELECT * FROM {table}", conn) for table in TABLES}  # fixed table names
 
-    data = {
-        "products": pd.read_sql("SELECT * FROM products", conn),
-        "trends":   pd.read_sql("SELECT * FROM trends", conn),
-        "runs":     pd.read_sql("SELECT * FROM scrape_runs", conn),
-    }
-
-    conn.close()
+    # Booleans come back as 0/1 from SQLite and True/False from PostgreSQL
+    for col in ["is_promotional", "is_secondhand"]:
+        data["products"][col] = data["products"][col].astype(int)
     return data
 
 
@@ -47,8 +56,13 @@ if not data:
     st.stop()
 
 products = data["products"]
-trends   = data["trends"]
-runs     = data["runs"]
+runs     = data["scrape_runs"]
+history  = data["price_history"]
+quality  = data["quality_results"]
+
+if products.empty:
+    st.warning("The database is empty. Run the pipeline first : python main.py")
+    st.stop()
 
 # --- Sidebar ---
 st.sidebar.title("⚙️ Filters")
@@ -78,7 +92,12 @@ st.sidebar.metric("Products matching filters", f"{len(filtered):,}")
 
 # --- Header ---
 st.title("👗 Fashion ETL Dashboard")
-st.caption("Real-time fashion market trends — powered by Vinted, Awin & more")
+last_run = runs.sort_values("id").iloc[-1] if not runs.empty else None
+st.caption(
+    "French fashion market trends from Vinted (secondhand) and Awin affiliate feeds (Sneakin, Kastner & Öhler)"
+    + (f" — last run #{int(last_run['id'])} : {last_run['status']}, {str(last_run['started_at'])[:16]}"
+       if last_run is not None else "")
+)
 st.divider()
 
 # --- KPI row ---
@@ -101,9 +120,12 @@ st.header("📦 Overview")
 col1, col2 = st.columns(2)
 
 with col1:
-    st.subheader("Products by category")
+    st.subheader("Products by category (top 15)")
+    categorized = filtered[filtered["category"] != "other"]
+    if len(filtered):
+        st.caption(f"{1 - len(categorized) / len(filtered):.0%} of products could not be categorized (hidden)")
     by_cat = (
-        filtered.groupby("category")
+        categorized.groupby("category")
         .size()
         .reset_index(name="count")
         .sort_values("count", ascending=False)
@@ -150,7 +172,7 @@ with col1:
 with col2:
     st.subheader("Avg price by category (top 15)")
     avg_price = (
-        filtered.groupby("category")["price"]
+        categorized.groupby("category")["price"]
         .mean()
         .reset_index(name="avg_price")
         .sort_values("avg_price", ascending=False)
@@ -161,34 +183,26 @@ with col2:
 
 # --- Price evolution over time ---
 st.subheader("📈 Price evolution over pipeline runs")
-if not runs.empty and not products.empty:
-    products["scraped_at"] = pd.to_datetime(products["scraped_at"], errors="coerce")
-    runs["started_at"]     = pd.to_datetime(runs["started_at"], errors="coerce")
-
-    price_evo = []
-    for _, run in runs.iterrows():
-        run_date  = pd.to_datetime(run["started_at"]).date()
-        run_prods = products[products["scraped_at"].dt.date == run_date]
-        if not run_prods.empty:
-            price_evo.append({
-                "Run #":     f"Run #{int(run['id'])}",
-                "Avg price": round(run_prods["price"].mean(), 2),
-                "Min price": round(run_prods["price"].min(), 2),
-                "Max price": round(run_prods["price"].max(), 2),
-            })
-
-    if price_evo:
-        df_evo = pd.DataFrame(price_evo).set_index("Run #")
-        st.line_chart(df_evo)
-    else:
-        st.info("Not enough runs yet to show price evolution — run the pipeline a few more times.")
+evolution = (
+    history.dropna(subset=["price"])
+    .merge(runs[runs["status"].isin(["success", "partial"])][["id", "started_at"]],
+           left_on="run_id", right_on="id")
+    .groupby("run_id")
+    .agg(avg_price=("price", "mean"), median_price=("price", "median"), products=("price", "size"))
+    .round(2)
+)
+if len(evolution) >= 2:
+    evolution.index = [f"Run #{i}" for i in evolution.index]
+    st.line_chart(evolution[["avg_price", "median_price"]])
+else:
+    st.info("Price history needs at least two pipeline runs — it is filled at every run (price_history table).")
 
 st.divider()
 
 # ================================================================
 # SECTION 3 — SOURCE COMPARISON
 # ================================================================
-st.header("🏪 Source Comparison — Sneakin vs Kastner & Öhler vs Vinted")
+st.header("🏪 Source Comparison")
 
 source_stats = (
     products.groupby("source")
@@ -212,7 +226,7 @@ source_stats.columns       = [
     "Min price (€)", "Max price (€)",
     "Promo rate (%)", "Secondhand (%)"
 ]
-st.dataframe(source_stats, use_container_width=True)
+st.dataframe(source_stats, width="stretch")
 
 col1, col2 = st.columns(2)
 
@@ -305,7 +319,7 @@ with col2:
     if promo_products.empty:
         st.info("No promotional products found.")
     else:
-        st.dataframe(promo_products, use_container_width=True)
+        st.dataframe(promo_products, width="stretch")
 
 st.divider()
 
@@ -339,7 +353,7 @@ with col1:
     st.bar_chart(df_words.set_index("keyword")["count"])
 
 with col2:
-    st.dataframe(df_words, use_container_width=True)
+    st.dataframe(df_words, width="stretch")
 
 st.divider()
 
@@ -416,14 +430,33 @@ st.dataframe(
     ]]
     .sort_values("price")
     .head(100),
-    use_container_width=True,
+    width="stretch",
 )
+
+# ================================================================
+# SECTION 9 — PIPELINE HEALTH
+# ================================================================
+st.divider()
+st.header("🩺 Pipeline Health")
+
+recent_runs = runs.sort_values("id", ascending=False).head(10)[
+    ["id", "started_at", "status", "products_scraped", "products_loaded", "quality_passed", "failed_steps"]
+]
+st.subheader("Last runs")
+st.dataframe(recent_runs, width="stretch", hide_index=True)
+
+if not quality.empty:
+    last_quality_run = quality["run_id"].max()
+    st.subheader(f"Quality checks — run #{last_quality_run}")
+    checks = quality[quality["run_id"] == last_quality_run][["check_name", "passed", "message"]]
+    checks["passed"] = checks["passed"].astype(bool).map({True: "✅", False: "❌"})
+    st.dataframe(checks, width="stretch", hide_index=True)
 
 # ================================================================
 # FOOTER
 # ================================================================
 st.divider()
 st.caption(
-    "Fashion ETL Pipeline — Built with Python, SQLite, "
-    "Vinted API, Awin (Sneakin + Kastner & Öhler) & Streamlit"
+    "Fashion ETL Pipeline — Python, SQLAlchemy (SQLite / PostgreSQL), "
+    "Vinted API, Awin feeds (Sneakin + Kastner & Öhler) & Streamlit"
 )
