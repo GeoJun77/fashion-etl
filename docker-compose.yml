@@ -1,42 +1,59 @@
 # docker-compose.yml
-# Runs the full stack : ETL pipeline + PostgreSQL database
+# Full stack : PostgreSQL + scheduled ETL pipeline + Streamlit dashboard
+#
+#   docker compose up --build      →  dashboard on http://localhost:8501
+
+x-app-env: &app-env
+  DATABASE_URL: postgresql://fashion:fashion123@db:5432/fashion_etl
+  LOG_LEVEL: INFO
 
 services:
 
-  # PostgreSQL database
   db:
     image: postgres:15-alpine
     environment:
       POSTGRES_USER: fashion
-      POSTGRES_PASSWORD: fashion123
+      POSTGRES_PASSWORD: fashion123   # local demo only
       POSTGRES_DB: fashion_etl
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U fashion"]
+      test: ["CMD-SHELL", "pg_isready -U fashion -d fashion_etl"]
       interval: 5s
       timeout: 5s
       retries: 5
 
-  # ETL pipeline
   etl:
     build:
       context: .
       dockerfile: docker/Dockerfile
     environment:
-      DATABASE_URL: postgresql://fashion:fashion123@db:5432/fashion_etl
+      <<: *app-env
       SCRAPE_DELAY: 2
       MAX_PRODUCTS: 500
-      LOG_LEVEL: INFO
       SCHEDULE_HOURS: 6
+      AWIN_FEED_URL: ${AWIN_FEED_URL:-}
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - ./logs:/app/logs
-      - ./data:/app/data
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    command: ["streamlit", "run", "dashboard/app.py", "--server.port=8501", "--server.address=0.0.0.0"]
+    environment:
+      <<: *app-env
+    ports:
+      - "8501:8501"
+    depends_on:
+      db:
+        condition: service_healthy
 
 volumes:
   postgres_data:
