@@ -1,131 +1,145 @@
 # src/pipeline/orchestrator.py
-# Orchestrates the full ETL pipeline : Extract → Transform → Load
+# Orchestrates the full ETL pipeline : Extract → Transform → Load → Quality → Trends
 
-from datetime import datetime
+from collections.abc import Callable
+from datetime import datetime, timezone
+
 from loguru import logger
 
+from config.settings import settings
+from src.loaders.sql_loader import finish_run, init_db, load_products, start_run
+from src.quality.checks import QualityChecker
+from src.scrapers.awin_scraper import AwinScraper
+from src.scrapers.base_scraper import BaseScraper, RawProduct
 from src.scrapers.mock_scraper import MockScraper
 from src.scrapers.vinted_scraper import VintedScraper
-from src.scrapers.awin_scraper import AwinScraper
 from src.transformers.cleaner import Cleaner
 from src.transformers.trend_analyzer import TrendAnalyzer
-from src.loaders.sql_loader import init_db, start_run, finish_run, load_products
-from src.quality.checks import QualityChecker
-from config.settings import settings
+
+# A source is a name + a factory, so a failing constructor (e.g. network down)
+# is caught like any other extraction error
+SourceFactory = Callable[[], BaseScraper]
+
+
+def default_sources() -> dict[str, SourceFactory]:
+    """Sources enabled by the configuration."""
+    sources: dict[str, SourceFactory] = {}
+    if settings.awin_feed_url:
+        sources["awin"] = lambda: AwinScraper(feed_url=settings.awin_feed_url)
+    sources["vinted"] = VintedScraper
+    if settings.use_mock:
+        logger.warning("[Orchestrator] USE_MOCK is enabled — synthetic products will be loaded")
+        sources["mock"] = MockScraper
+    return sources
 
 
 class Orchestrator:
     """
-    Runs the full ETL pipeline in sequence.
-    Extract → Transform → Load → Quality → Trends
-    Logs every run in the database.
+    Runs the full ETL pipeline in sequence and logs every run in the database.
+
+    Run status :
+      - success : every step worked and all quality checks passed
+      - partial : products were loaded, but a source failed or a quality check failed
+      - failed  : nothing was loaded
     """
 
-    def __init__(self):
-        # Initialize the database tables on startup
+    def __init__(self, sources: dict[str, SourceFactory] | None = None):
         init_db()
-        logger.info("[Orchestrator] Pipeline ready")
+        self.sources = sources if sources is not None else default_sources()
+        logger.info(f"[Orchestrator] Pipeline ready — sources : {', '.join(self.sources)}")
 
     def run(self) -> dict:
-        """
-        Runs one full ETL cycle.
-        Returns a summary of the run.
-        """
+        """Runs one full ETL cycle and returns a summary of the run."""
         logger.info("[Orchestrator] Starting ETL pipeline...")
-        start_time = datetime.now()
+        start_time = datetime.now(timezone.utc)
         run_id = start_run()
-        errors = 0
+        failed_steps: list[str] = []
 
-        # --- Step 1 : Extract ---
-        logger.info("[Orchestrator] Step 1 : Extract")
-        raw_products = []
-        try:
-            # Awin scraper — real data from Kastner & Ohler and Sneakin
-            if settings.awin_feed_url:
-                awin = AwinScraper(feed_url=settings.awin_feed_url)
-                awin_products = awin.run(max_products=settings.max_products // 3)
-                raw_products.extend(awin_products)
-                logger.info(f"[Orchestrator] Awin : {len(awin_products)} products")
-
-            # Vinted scraper — real secondhand data
-            vinted = VintedScraper()
-            vinted_products = vinted.run(max_products=settings.max_products // 3)
-            raw_products.extend(vinted_products)
-            logger.info(f"[Orchestrator] Vinted : {len(vinted_products)} products")
-
-            # Mock scraper — fills in while waiting for more Awin approvals
-            mock = MockScraper()
-            mock_products = mock.run(max_products=settings.max_products // 3)
-            raw_products.extend(mock_products)
-            logger.info(f"[Orchestrator] Mock : {len(mock_products)} products")
-
-            logger.info(f"[Orchestrator] Total extracted : {len(raw_products)} products")
-
-        except Exception as e:
-            logger.error(f"[Orchestrator] Extract failed : {e}")
-            errors += 1
+        # --- Step 1 : Extract — one try per source, so one broken source does not stop the others ---
+        raw_products: list[RawProduct] = []
+        extracted_by_source: dict[str, int] = {}
+        for name, factory in self.sources.items():
+            try:
+                products = factory().run(max_products=settings.max_products)
+                raw_products.extend(products)
+                extracted_by_source[name] = len(products)
+                if not products:
+                    logger.warning(f"[Orchestrator] {name} returned 0 products")
+                    failed_steps.append(f"extract:{name}")
+            except Exception as e:
+                logger.exception(f"[Orchestrator] Extract failed for {name} : {e}")
+                extracted_by_source[name] = 0
+                failed_steps.append(f"extract:{name}")
+        logger.info(f"[Orchestrator] Extracted {len(raw_products)} products {extracted_by_source}")
 
         # --- Step 2 : Transform ---
-        logger.info("[Orchestrator] Step 2 : Transform")
         clean_products = []
         try:
-            cleaner = Cleaner()
-            clean_products = cleaner.clean(raw_products)
+            clean_products = Cleaner().clean(raw_products)
         except Exception as e:
-            logger.error(f"[Orchestrator] Transform failed : {e}")
-            errors += 1
+            logger.exception(f"[Orchestrator] Transform failed : {e}")
+            failed_steps.append("transform")
 
         # --- Step 3 : Load ---
-        logger.info("[Orchestrator] Step 3 : Load")
         loaded = 0
         try:
-            loaded = load_products(clean_products)
+            loaded = load_products(clean_products, run_id=run_id)
         except Exception as e:
-            logger.error(f"[Orchestrator] Load failed : {e}")
-            errors += 1
+            logger.exception(f"[Orchestrator] Load failed : {e}")
+            failed_steps.append("load")
 
         # --- Step 4 : Quality checks ---
-        logger.info("[Orchestrator] Step 4 : Quality checks")
+        quality_passed = None
+        failed_checks: list[str] = []
         try:
-            checker = QualityChecker()
-            report = checker.run(run_id=run_id)
+            report = QualityChecker().run(run_id=run_id)
+            quality_passed = report.passed
+            failed_checks = report.failed_checks
             if not report.passed:
-                logger.warning("[Orchestrator] Quality checks FAILED — see report")
+                failed_steps.append("quality")
         except Exception as e:
-            logger.error(f"[Orchestrator] Quality checks failed : {e}")
-            errors += 1
+            logger.exception(f"[Orchestrator] Quality checks failed : {e}")
+            failed_steps.append("quality")
 
         # --- Step 5 : Trend analysis ---
-        logger.info("[Orchestrator] Step 5 : Trend analysis")
-        try:
-            analyzer = TrendAnalyzer()
-            trend_report = analyzer.analyze()
-            analyzer.save(trend_report)
-        except Exception as e:
-            logger.error(f"[Orchestrator] Trend analysis failed : {e}")
-            errors += 1
+        if loaded:
+            try:
+                analyzer = TrendAnalyzer()
+                analyzer.save(analyzer.analyze(), run_id=run_id)
+            except Exception as e:
+                logger.exception(f"[Orchestrator] Trend analysis failed : {e}")
+                failed_steps.append("trends")
 
         # --- Finish ---
-        duration = (datetime.now() - start_time).total_seconds()
-        status = "success" if errors == 0 else "failed"
+        if loaded == 0:
+            status = "failed"
+        elif failed_steps:
+            status = "partial"
+        else:
+            status = "success"
 
         finish_run(
             run_id=run_id,
             products_scraped=len(raw_products),
             products_loaded=loaded,
-            errors=errors,
+            errors=len(failed_steps),
             status=status,
+            quality_passed=quality_passed,
+            failed_steps=failed_steps,
         )
 
+        duration = (datetime.now(timezone.utc) - start_time).total_seconds()
         summary = {
             "run_id":           run_id,
             "status":           status,
             "duration_seconds": round(duration, 2),
+            "extracted":        extracted_by_source,
             "products_scraped": len(raw_products),
             "products_cleaned": len(clean_products),
             "products_loaded":  loaded,
-            "errors":           errors,
+            "quality_passed":   quality_passed,
+            "failed_checks":    failed_checks,
+            "failed_steps":     failed_steps,
         }
-
         logger.info(f"[Orchestrator] Pipeline finished in {duration:.1f}s — {summary}")
         return summary
